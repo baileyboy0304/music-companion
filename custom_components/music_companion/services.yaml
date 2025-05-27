@@ -1,0 +1,63 @@
+fetch_audio_tag:
+  description: "Recognize audio from a Home Assistant Assist PE Satellite and tag it."
+  fields:
+    duration:
+      description: "Recording duration in seconds."
+      example: 10
+      default: 12
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: "seconds"
+    include_lyrics:
+      description: "Fetch synchronized lyrics after identifying the track"
+      example: true
+      default: true
+      selector:
+        boolean:
+    add_to_spotify:
+      description: "Add the discovered song to your Spotify playlist"
+      example: true
+      default: true
+      selector:
+        boolean:
+    tagging_switch_entity_id:
+      description: "Switch entity to control during audio recording (can be inferred from assist_satellite_entity)"
+      example: "switch.home_assistant_voice_093d58_tagging_enable"
+      required: false
+      selector:
+        entity:
+          domain: switch
+    assist_satellite_entity:
+      description: "Assist satellite entity (alternative to tagging_switch_entity_id - will auto-infer the switch)"
+      example: "assist_satellite.home_assistant_voice_093d58_assist_satellite"
+      required: false
+      selector:
+        entity:
+          domain: assist_satellite
+
+fetch_lyrics:
+  description: "Fetch synchronized lyrics for the currently playing track."
+  fields:
+    entity_id:
+      description: "The media player entity to fetch lyrics for"
+      example: "media_player.living_room_speaker"
+      required: true
+      selector:
+        entity:
+          domain: media_player
+
+add_to_spotify:
+  description: "Add a track to your Spotify playlist."
+  fields:
+    title:
+      description: "Title of the track to add (optional if last tagged song exists)"
+      example: "Billie Jean"
+      selector:
+        text:
+    artist:
+      description: "Artist of the track to add (optional if last tagged song exists)"
+      example: "Michael Jackson"
+      selector:
+        text:
