@@ -36,21 +36,44 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 def infer_tagging_switch_from_assist_satellite(hass, assist_satellite_entity):
-    """Infer tagging switch entity from assist satellite entity ID."""
-    if not assist_satellite_entity.startswith("assist_satellite.") or not assist_satellite_entity.endswith("_assist_satellite"):
+    """Infer tagging switch entity from assist satellite entity ID using device registry."""
+    if not assist_satellite_entity.startswith("assist_satellite."):
         return None, "Invalid assist satellite entity format"
     
-    # Extract base name: assist_satellite.home_assistant_voice_093d58_assist_satellite -> home_assistant_voice_093d58
-    base_name = assist_satellite_entity[17:-17]  # Remove "assist_satellite." and "_assist_satellite"
-    
-    # Infer tagging switch entity
-    tagging_switch = f"switch.{base_name}_audio_tagging_enable"
-    
-    # Check if switch exists
-    if hass.states.get(tagging_switch) is None:
-        return None, f"Tagging switch '{tagging_switch}' not found"
-    
-    return tagging_switch, None
+    try:
+        # Get the entity registry and device registry
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        
+        # Find the assist satellite entity in the registry
+        assist_entity = entity_registry.async_get(assist_satellite_entity)
+        if not assist_entity or not assist_entity.device_id:
+            return None, f"Assist satellite entity '{assist_satellite_entity}' not found or has no device"
+        
+        # Get the device
+        device = device_registry.async_get(assist_entity.device_id)
+        if not device:
+            return None, f"Device not found for assist satellite"
+        
+        # Find all entities belonging to this device
+        device_entities = er.async_entries_for_device(entity_registry, assist_entity.device_id)
+        
+        # Look for a switch entity with "tagging_enable" in the name
+        for entity in device_entities:
+            if (entity.domain == "switch" and 
+                "tagging_enable" in entity.entity_id and 
+                entity.disabled_by is None):  # Make sure it's not disabled
+                
+                # Verify the switch actually exists in the state registry
+                if hass.states.get(entity.entity_id):
+                    return entity.entity_id, None
+        
+        # If we get here, no tagging switch was found on this device
+        switch_entities = [e.entity_id for e in device_entities if e.domain == "switch"]
+        return None, f"No tagging switch found on device. Available switches: {switch_entities}"
+        
+    except Exception as e:
+        return None, f"Error looking up device entities: {str(e)}"
 
 def get_devices_for_domain(hass: HomeAssistant, domain: str):
     """Get devices for a specific domain."""
