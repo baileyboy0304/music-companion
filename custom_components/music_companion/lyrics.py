@@ -830,16 +830,7 @@ async def handle_fetch_lyrics(hass: HomeAssistant, call: ServiceCall):
     _LOGGER.info("Processing lyrics request for entry_id: %s, media_player: %s, lyrics_entities: %s", 
                 entry_id, entity_id, list(lyrics_entities.values()))
     
-    # Get current track info
-    track, artist, pos, updated_at = get_media_player_info(hass, entity_id, entry_id)
-    
-    if not track or not artist:
-        _LOGGER.warning("Handle Fetch Lyrics: Missing track or artist information (device: %s).", entry_id)
-        return
-    
-    # Fetch and display lyrics
-    await fetch_lyrics_for_track(hass, track, artist, pos, updated_at, entity_id, False, entry_id)
-    
+    # Define the monitoring function first
     async def monitor_playback_event(event):
         """Monitor media player state changes."""
         entity = event.data.get('entity_id')
@@ -904,9 +895,19 @@ async def handle_fetch_lyrics(hass: HomeAssistant, call: ServiceCall):
             # Not playing, but lyrics display will be handled by MediaTracker
             _LOGGER.info("Monitor Playback: Media player is not playing (device: %s).", entry_id)
 
-    # Register listener for state change events
+    # Register listener for state change events FIRST - before checking current state
     async_track_state_change_event(hass, [entity_id], monitor_playback_event)
     _LOGGER.debug("Registered state change listener for: %s (device: %s)", entity_id, entry_id)
+    
+    # Now check current state and fetch lyrics if something is already playing
+    track, artist, pos, updated_at = get_media_player_info(hass, entity_id, entry_id)
+    
+    if track and artist:
+        _LOGGER.info("Music already playing on startup - fetching lyrics immediately")
+        # Fetch and display lyrics for currently playing track
+        await fetch_lyrics_for_track(hass, track, artist, pos, updated_at, entity_id, False, entry_id)
+    else:
+        _LOGGER.info("No music currently playing - waiting for playback to start (monitoring enabled)")
 
 
 async def async_setup_lyrics_service(hass: HomeAssistant):
