@@ -202,9 +202,9 @@ class LyricsSynchronizer:
             self.entry_id                 # Device entry ID
         )
         
-        # Set the initial position if provided
+        # Handle initial position setup
         if pos is not None and updated_at is not None:
-            # Use the set_initial_position method which works for all source types
+            # We have reliable position data - use it
             self.media_tracker.set_initial_position(pos, updated_at)
             
             # Calculate initial position in milliseconds for better lyrics placement
@@ -212,58 +212,19 @@ class LyricsSynchronizer:
             _LOGGER.info("LyricsSynchronizer: Initial position is %.2f ms (device: %s)", 
                         initial_position_ms, self.entry_id)
             
-            # Find the correct starting point in lyrics
-            line_found = False
-            if timeline:
-                # For radio sources, we need to be more aggressive in finding the right starting point
-                if is_radio_source:
-                    # Calculate where we expect to be in about 500ms (to account for processing delay)
-                    target_position_ms = initial_position_ms + 500
-                    
-                    # Try to find a line that's AFTER our current position but within a reasonable window
-                    for i in range(1, len(timeline)):
-                        if timeline[i-1] > initial_position_ms and timeline[i-1] < initial_position_ms + 10000:
-                            # Found a line coming up soon - use it
-                            self.current_line_index = i-1
-                            _LOGGER.info("LyricsSynchronizer: Starting at upcoming line index %d at %d ms (device: %s)", 
-                                       i-1, timeline[i-1], self.entry_id)
-                            line_found = True
-                            
-                            # Display immediately
-                            previous_line = lyrics[i-2] if i > 1 else ""
-                            current_line = lyrics[i-1]
-                            next_line = lyrics[i] if i < len(lyrics) else ""
-                            
-                            await update_lyrics_entities(self.hass, previous_line, current_line, next_line, self.entry_id)
-                            break
-                
-                # If we didn't find an upcoming line, or this isn't a radio source,
-                # fall back to finding the line that matches our current position
-                if not line_found:
-                    for i in range(1, len(timeline)):
-                        if timeline[i-1] <= initial_position_ms < timeline[i]:
-                            # We found the right line to start with
-                            self.current_line_index = i-1
-                            _LOGGER.info("LyricsSynchronizer: Starting at line index %d (device: %s)", 
-                                        self.current_line_index, self.entry_id)
-                            
-                            # Display the initial lyrics
-                            previous_line = lyrics[i-2] if i > 1 else ""
-                            current_line = lyrics[i-1]
-                            next_line = lyrics[i] if i < len(lyrics) else ""
-                            
-                            await update_lyrics_entities(self.hass, previous_line, current_line, next_line, self.entry_id)
-                            break
+            # Find and display appropriate lyrics for this position
+            self._sync_to_position(initial_position_ms)
+        else:
+            # No reliable position data - start from beginning and wait for position updates
+            _LOGGER.info("LyricsSynchronizer: No position data - starting from beginning, waiting for fresh position updates (device: %s)", self.entry_id)
             
-            # If we couldn't find the right position in the timeline, 
-            # at least display the first line if we have lyrics
-            if self.current_line_index == -1 and len(lyrics) > 0:
-                # Show first few lines immediately
-                _LOGGER.info("LyricsSynchronizer: No matching position found, showing first lines (device: %s)", self.entry_id)
-                if len(lyrics) > 1:
-                    await update_lyrics_entities(self.hass, "", lyrics[0], lyrics[1], self.entry_id)
-                else:
-                    await update_lyrics_entities(self.hass, "", lyrics[0], "", self.entry_id)
+            # Show first lyrics line
+            if len(lyrics) > 1:
+                await update_lyrics_entities(self.hass, "", lyrics[0], lyrics[1], self.entry_id)
+            elif len(lyrics) > 0:
+                await update_lyrics_entities(self.hass, "", lyrics[0], "", self.entry_id)
+            
+            # Don't set any initial position in MediaTracker - let it get fresh data from state changes
         
         # Start tracking
         await self.media_tracker.start_tracking()
@@ -272,9 +233,63 @@ class LyricsSynchronizer:
         # Start a periodic force update task
         asyncio.create_task(self._force_update_task())
         
-        _LOGGER.info("LyricsSynchronizer: Started for %s with %d lyrics lines (radio source: %s, device: %s)", 
-                    self.entity_id, len(self.lyrics), is_radio_source, self.entry_id)
+        _LOGGER.info("LyricsSynchronizer: Started for %s with %d lyrics lines (radio source: %s, position sync: %s, device: %s)", 
+                    self.entity_id, len(self.lyrics), is_radio_source, pos is not None, self.entry_id)
     
+    
+    def _sync_to_position(self, position_ms):
+        """Sync lyrics to a specific position in milliseconds."""
+        line_found = False
+        if self.timeline:
+            # For radio sources, be more aggressive in finding the right starting point
+            if hasattr(self.media_tracker, 'is_radio_source') and self.media_tracker.is_radio_source:
+                # Calculate where we expect to be in about 500ms (to account for processing delay)
+                target_position_ms = position_ms + 500
+                
+                # Try to find a line that's AFTER our current position but within a reasonable window
+                for i in range(1, len(self.timeline)):
+                    if self.timeline[i-1] > position_ms and self.timeline[i-1] < position_ms + 10000:
+                        # Found a line coming up soon - use it
+                        self.current_line_index = i-1
+                        _LOGGER.info("LyricsSynchronizer: Starting at upcoming line index %d at %d ms (device: %s)", 
+                                   i-1, self.timeline[i-1], self.entry_id)
+                        line_found = True
+                        
+                        # Display immediately
+                        previous_line = self.lyrics[i-2] if i > 1 else ""
+                        current_line = self.lyrics[i-1]
+                        next_line = self.lyrics[i] if i < len(self.lyrics) else ""
+                        
+                        asyncio.create_task(update_lyrics_entities(self.hass, previous_line, current_line, next_line, self.entry_id))
+                        break
+            
+            # If we didn't find an upcoming line, or this isn't a radio source,
+            # fall back to finding the line that matches our current position
+            if not line_found:
+                for i in range(1, len(self.timeline)):
+                    if self.timeline[i-1] <= position_ms < self.timeline[i]:
+                        # We found the right line to start with
+                        self.current_line_index = i-1
+                        _LOGGER.info("LyricsSynchronizer: Starting at line index %d (device: %s)", 
+                                    self.current_line_index, self.entry_id)
+                        
+                        # Display the initial lyrics
+                        previous_line = self.lyrics[i-2] if i > 1 else ""
+                        current_line = self.lyrics[i-1]
+                        next_line = self.lyrics[i] if i < len(self.lyrics) else ""
+                        
+                        asyncio.create_task(update_lyrics_entities(self.hass, previous_line, current_line, next_line, self.entry_id))
+                        line_found = True
+                        break
+        
+        # If we couldn't find the right position in the timeline, show first lines
+        if not line_found and len(self.lyrics) > 0:
+            _LOGGER.info("LyricsSynchronizer: No matching position found, showing first lines (device: %s)", self.entry_id)
+            if len(self.lyrics) > 1:
+                asyncio.create_task(update_lyrics_entities(self.hass, "", self.lyrics[0], self.lyrics[1], self.entry_id))
+            else:
+                asyncio.create_task(update_lyrics_entities(self.hass, "", self.lyrics[0], "", self.entry_id))
+
     async def stop(self):
         """Stop lyrics synchronization."""
         if not self.active:

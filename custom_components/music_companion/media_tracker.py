@@ -153,6 +153,28 @@ class MediaTracker:
         # Update position info when available (only for non-radio sources)
         if not self.is_radio_source and new_position is not None:
             old_position = self.media_position
+            
+            # If we don't have any position data yet, and this is the first update,
+            # only use it if it seems reasonable (not way ahead in the song)
+            if self.media_position is None and self.position_updated_at is None:
+                # This is the first position update - check if it seems stale
+                if new_position_updated:
+                    try:
+                        if isinstance(new_position_updated, str):
+                            updated_dt = datetime.datetime.fromisoformat(new_position_updated)
+                        else:
+                            updated_dt = new_position_updated
+                        
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        age_seconds = (now - updated_dt).total_seconds()
+                        
+                        if age_seconds > 30:  # Position data is more than 30 seconds old
+                            _LOGGER.info("MediaTracker: Ignoring stale initial position data (%.1f seconds old) (device: %s)", 
+                                       age_seconds, self.entry_id)
+                            return track_changed  # Don't update position, just return track change status
+                    except Exception as e:
+                        _LOGGER.debug("MediaTracker: Error checking position timestamp: %s (device: %s)", e, self.entry_id)
+            
             self.media_position = new_position
             self.position_updated_at = new_position_updated
             
