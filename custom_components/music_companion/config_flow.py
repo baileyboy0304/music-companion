@@ -44,7 +44,7 @@ def infer_tagging_switch_from_assist_satellite(hass, assist_satellite_entity):
     base_name = assist_satellite_entity[17:-17]  # Remove "assist_satellite." and "_assist_satellite"
     
     # Infer tagging switch entity
-    tagging_switch = f"switch.{base_name}_tagging_enable"
+    tagging_switch = f"switch.{base_name}_audio_tagging_enable"
     
     # Check if switch exists
     if hass.states.get(tagging_switch) is None:
