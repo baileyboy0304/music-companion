@@ -23,6 +23,8 @@ from .media_tracker import MediaTracker
 
 _LOGGER = logging.getLogger(__name__)
 
+_INTEGRATION_JUST_STARTED = True # handles issues around first track lyrics not being displayed
+
 SERVICE_FETCH_LYRICS_SCHEMA = vol.Schema({
     vol.Required("entity_id"): cv.entity_id
 })
@@ -658,6 +660,8 @@ def get_media_player_info(hass: HomeAssistant, entity_id: str, entry_id: str = N
 
 async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, pos, updated_at, entity_id, audiofingerprint, entry_id: str = None):
     """Fetch lyrics for a given track and synchronize with playback."""
+    global _INTEGRATION_JUST_STARTED
+    
     device_data = get_device_data(hass, entry_id)
     
     _LOGGER.info("Fetch: Fetching lyrics for: %s %s (device: %s)", artist, track, entry_id)
@@ -675,21 +679,12 @@ async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, p
     # Reset the current display first to show we're working on it
     await update_lyrics_entities(hass, "", "Searching for lyrics...", "", entry_id)
 
-    # Ensure parameters are valid
-    if pos is None or updated_at is None:
-        # Try to get current position if not provided
-        if player_state and player_state.state == "playing":
-            pos = player_state.attributes.get("media_position")
-            updated_at = player_state.attributes.get("media_position_updated_at")
-            _LOGGER.info("Fetch: Retrieved current position: pos=%s, updated_at=%s (device: %s)", pos, updated_at, entry_id)
-        
-        # If still not available, exit
-        if pos is None or updated_at is None:
-            _LOGGER.error("Fetch: pos or updated_at is not initialized. Exiting lyrics sync (device: %s).", entry_id)
-            active_lyrics_sync = device_data.get(DEVICE_DATA_LYRICS_SYNC)
-            if active_lyrics_sync and active_lyrics_sync.active:
-                await active_lyrics_sync.stop()
-            return
+    # Handle first track after startup - ignore position data
+    if _INTEGRATION_JUST_STARTED:
+        _LOGGER.info("Fetch: First track after startup - ignoring position data (device: %s)", entry_id)
+        pos = None
+        updated_at = None
+        _INTEGRATION_JUST_STARTED = False
 
     # Get current track info
     current_track = player_state.attributes.get("media_title", "") if player_state else ""
