@@ -15,7 +15,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_registry import async_get
 from acrcloud.recognizer import ACRCloudRecognizer, ACRCloudRecognizeType
 # Import trigger function from lyrics.py
-from .lyrics import trigger_lyrics_lookup, update_lyrics_input_text
+from .lyrics import trigger_lyrics_lookup, update_lyrics_entities
 from .const import DOMAIN, ENTRY_TYPE_MASTER, ENTRY_TYPE_DEVICE
 
 # Define whether lyrics lookup should be enabled after tagging
@@ -314,7 +314,7 @@ class TaggingService:
         # Formatted response for the main notification
         message = f"🎵 **Title**: {title}\n👤 **Artist**: {artist_name}\n⏱️ **Play Offset**: {play_time} (MM:SS)\n📱 **Device**: {device_name}"
 
-        await update_lyrics_input_text(self.hass, "", "", "")
+        await update_lyrics_entities(self.hass, "", "", "")
 
         # Create a persistent notification with the formatted response
         await self.hass.services.async_call(
@@ -355,7 +355,7 @@ class TaggingService:
         """Listen for UDP audio data in chunks until successful recognition or timeout."""
         try:
             _LOGGER.info("Waiting for incoming UDP audio data...")
-            await update_lyrics_input_text(self.hass, "Listening......", "", "")
+            await update_lyrics_entities(self.hass, "Listening......", "", "")
             
             # Turn on the tagging switch (only if it exists)
             if self.tagging_switch_entity_id:
@@ -383,7 +383,7 @@ class TaggingService:
                     _LOGGER.info(f"Turned ON tagging switch: {self.tagging_switch_entity_id}")
                 except Exception as e:
                     _LOGGER.error(f"Failed to turn on tagging switch: {e}")
-                    await update_lyrics_input_text(self.hass, "", "", "")
+                    await update_lyrics_entities(self.hass, "", "", "")
                     return
             
             total_chunks = max_duration // CHUNK_DURATION
@@ -439,7 +439,7 @@ class TaggingService:
                     }
                 )
                 
-                await update_lyrics_input_text(self.hass, "", "", "")
+                await update_lyrics_entities(self.hass, "", "", "")
 
         except Exception as e:
             _LOGGER.error("Error in Tagging Service: %s", e)
@@ -474,7 +474,7 @@ class TaggingService:
                 }
             )
             
-            await update_lyrics_input_text(self.hass, "", "", "")
+            await update_lyrics_entities(self.hass, "", "", "")
 
     def stop(self):
         """Stop the tagging service."""
