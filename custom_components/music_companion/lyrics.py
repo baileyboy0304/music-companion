@@ -20,6 +20,8 @@ from .const import (
     DEVICE_LYRICS_LINE3_TEMPLATE,
     CONF_DISPLAY_DEVICE,
     CONF_USE_DISPLAY_DEVICE,
+    CONF_DEVICE_NAME,
+    CONF_MEDIA_PLAYER_ENTITY,
     VIEW_ASSIST_DOMAIN
 )
 from homeassistant.helpers.event import async_track_state_change_event
@@ -59,37 +61,90 @@ def get_device_data(hass: HomeAssistant, entry_id: str = None):
 
 
 def get_device_lyrics_entities(hass: HomeAssistant, entry_id: str = None):
-    """Get device-specific lyrics entity names."""
+    """Get device-specific lyrics entity names using device registry."""
     device_data = get_device_data(hass, entry_id)
     
     if DEVICE_DATA_LYRICS_ENTITIES not in device_data:
-        # Get device name from config to generate entity names
-        _LOGGER.error("DEBUG: entry_id=%s, available_keys=%s", entry_id, list(hass.data.get(DOMAIN, {}).keys()))
-        # Get device name from config to generate entity names
-        device_name = "default"  # <-- Falls back to this
-        if entry_id and entry_id != "default" and entry_id in hass.data.get(DOMAIN, {}):
-            config_data = hass.data[DOMAIN][entry_id]
-            if hasattr(config_data, 'get') and "device_name" in config_data:
-                # Convert device name to entity-friendly format
-                device_name = config_data["device_name"].lower().replace(" ", "_").replace("-", "_")
+        if not entry_id:
+            _LOGGER.error("No entry_id provided for lyrics entity lookup")
+            return {}
         
-        device_data[DEVICE_DATA_LYRICS_ENTITIES] = {
-            "line1": DEVICE_LYRICS_LINE1_TEMPLATE.format(device_name),
-            "line2": DEVICE_LYRICS_LINE2_TEMPLATE.format(device_name),
-            "line3": DEVICE_LYRICS_LINE3_TEMPLATE.format(device_name),
-        }
+        # Get the device registry and entity registry
+        device_registry = dr.async_get(hass)
+        entity_registry = er.async_get(hass)
+        
+        # Find the device that belongs to this config entry
+        device = None
+        for dev in device_registry.devices.values():
+            if entry_id in dev.config_entries:
+                device = dev
+                break
+        
+        if not device:
+            _LOGGER.error("No device found for config entry: %s", entry_id)
+            return {}
+        
+        _LOGGER.debug("Found device: %s (id: %s) for entry: %s", device.name, device.id, entry_id)
+        
+        # Find ALL entities that belong to this device
+        device_entities = er.async_entries_for_device(entity_registry, device.id)
+        
+        # Filter for the lyrics text entities
+        lyrics_entities = {}
+        for entity in device_entities:
+            if (entity.domain == "text" and 
+                entity.platform == DOMAIN and 
+                "lyrics" in entity.entity_id and
+                not entity.disabled_by):
+                
+                # Determine which line this is
+                if "line1" in entity.entity_id:
+                    lyrics_entities["line1"] = entity.entity_id
+                elif "line2" in entity.entity_id:
+                    lyrics_entities["line2"] = entity.entity_id
+                elif "line3" in entity.entity_id:
+                    lyrics_entities["line3"] = entity.entity_id
+        
+        if len(lyrics_entities) != 3:
+            _LOGGER.error("Expected 3 lyrics entities for device %s, found %d: %s", 
+                         device.name, len(lyrics_entities), list(lyrics_entities.values()))
+            return {}
+        
+        _LOGGER.info("Found lyrics entities for device %s: %s", device.name, lyrics_entities)
+        device_data[DEVICE_DATA_LYRICS_ENTITIES] = lyrics_entities
     
     return device_data[DEVICE_DATA_LYRICS_ENTITIES]
 
 
 def get_device_config_data(hass: HomeAssistant, entry_id: str = None):
     """Get device configuration data."""
-    if not entry_id or DOMAIN not in hass.data:
+    if not entry_id:
         return None
     
-    config_data = hass.data[DOMAIN].get(entry_id)
-    if hasattr(config_data, 'get'):
-        return config_data
+    # Go through config entries to find the device
+    for config_entry in hass.config_entries.async_entries(DOMAIN):
+        if config_entry.entry_id == entry_id and config_entry.data.get("entry_type") == "device":
+            return config_entry.data
+    
+    return None
+
+
+def find_entry_id_for_media_player(hass: HomeAssistant, media_player_entity_id: str):
+    """Find the config entry ID for a given media player entity."""
+    
+    # Go through ALL Music Companion config entries
+    for config_entry in hass.config_entries.async_entries(DOMAIN):
+        # Only check device entries (not master)
+        if config_entry.data.get("entry_type") == "device":
+            # Check if this entry's media player matches
+            configured_media_player = config_entry.data.get(CONF_MEDIA_PLAYER_ENTITY)
+            if configured_media_player == media_player_entity_id:
+                _LOGGER.info("Found config entry %s for media player %s (device: %s)", 
+                           config_entry.entry_id, media_player_entity_id, 
+                           config_entry.data.get(CONF_DEVICE_NAME))
+                return config_entry.entry_id
+    
+    _LOGGER.error("No Music Companion config entry found for media player: %s", media_player_entity_id)
     return None
 
 
@@ -611,18 +666,49 @@ async def send_lyrics_to_display_device(hass: HomeAssistant, display_device: str
 
 async def update_lyrics_input_text(hass: HomeAssistant, previous_line: str, current_line: str, next_line: str, entry_id: str = None):
     """Update the text entities with the current lyrics lines."""
-    lyrics_entities = get_device_lyrics_entities(hass, entry_id)
-    
-    # Check if entities exist before trying to update them
-    entities_exist = all(hass.states.get(entity_id) for entity_id in lyrics_entities.values())
-    
-    if not entities_exist:
-        _LOGGER.warning("Lyrics entities not found for device %s. Expected: %s", entry_id, list(lyrics_entities.values()))
+    if not entry_id:
+        _LOGGER.error("No entry_id provided for lyrics update")
         return
     
-    await hass.services.async_call("text", "set_value", {"entity_id": lyrics_entities["line1"], "value": previous_line})
-    await hass.services.async_call("text", "set_value", {"entity_id": lyrics_entities["line2"], "value": current_line})
-    await hass.services.async_call("text", "set_value", {"entity_id": lyrics_entities["line3"], "value": next_line})
+    # Get the lyrics entities for this device
+    lyrics_entities = get_device_lyrics_entities(hass, entry_id)
+    
+    if not lyrics_entities:
+        _LOGGER.error("Could not find lyrics entities for entry_id: %s", entry_id)
+        return
+    
+    # Verify all entities exist and are available
+    missing_entities = []
+    for line_name, entity_id in lyrics_entities.items():
+        state = hass.states.get(entity_id)
+        if not state:
+            missing_entities.append(entity_id)
+        elif state.state == "unavailable":
+            _LOGGER.warning("Lyrics entity %s is unavailable", entity_id)
+    
+    if missing_entities:
+        _LOGGER.error("Lyrics entities missing: %s", missing_entities)
+        return
+    
+    # Update the entities
+    try:
+        await hass.services.async_call("text", "set_value", {
+            "entity_id": lyrics_entities["line1"], 
+            "value": previous_line
+        })
+        await hass.services.async_call("text", "set_value", {
+            "entity_id": lyrics_entities["line2"], 
+            "value": current_line
+        })
+        await hass.services.async_call("text", "set_value", {
+            "entity_id": lyrics_entities["line3"], 
+            "value": next_line
+        })
+        
+        _LOGGER.debug("Successfully updated lyrics for entry_id: %s", entry_id)
+        
+    except Exception as e:
+        _LOGGER.error("Error updating lyrics entities for entry_id %s: %s", entry_id, e)
 
 
 def clean_track_name(track):
@@ -876,34 +962,22 @@ async def handle_fetch_lyrics(hass: HomeAssistant, call: ServiceCall):
     """Main service handler: gets media info and fetches lyrics."""
     entity_id = call.data.get("entity_id")
     
-    # Try to find the matching device config for this entity
-    entry_id = None
-    if DOMAIN in hass.data:
-        _LOGGER.debug("Looking for device config matching entity: %s", entity_id)
-        _LOGGER.debug("Available entries: %s", list(hass.data[DOMAIN].keys()))
-        
-        for eid, config_data in hass.data[DOMAIN].items():
-            # Enhanced debugging to see what's in each entry
-            _LOGGER.debug("Processing entry %s: type=%s, content=%s", eid, type(config_data), config_data)
-            
-            # Check for dict-like objects (including mappingproxy used by Home Assistant)
-            if hasattr(config_data, 'get'):
-                entry_type = config_data.get("entry_type")
-                media_player = config_data.get("media_player_entity")
-                _LOGGER.debug("Entry %s: entry_type=%s, media_player=%s", eid, entry_type, media_player)
-                
-                if (entry_type == "device" and media_player == entity_id):
-                    entry_id = eid
-                    _LOGGER.debug("MATCH FOUND: %s", eid)
-                    break
-            else:
-                _LOGGER.debug("Entry %s is not dict-like, it's a %s with value: %s", eid, type(config_data), config_data)
-        
-        if not entry_id:
-            _LOGGER.warning("No device config found for media player: %s", entity_id)
-            _LOGGER.warning("Available entries: %s", list(hass.data[DOMAIN].keys()))
-    else:
-        _LOGGER.error("Domain data not found in hass.data")
+    # Find which Music Companion device this media player belongs to
+    entry_id = find_entry_id_for_media_player(hass, entity_id)
+    
+    if not entry_id:
+        _LOGGER.error("Cannot process lyrics request - media player %s is not configured in any Music Companion device", entity_id)
+        return
+    
+    # Verify we can find the lyrics entities for this device
+    lyrics_entities = get_device_lyrics_entities(hass, entry_id)
+    
+    if not lyrics_entities:
+        _LOGGER.error("Cannot process lyrics request - no lyrics entities found for entry_id: %s", entry_id)
+        return
+    
+    _LOGGER.info("Processing lyrics request for entry_id: %s, media_player: %s, lyrics_entities: %s", 
+                entry_id, entity_id, list(lyrics_entities.values()))
     
     # Get current track info
     track, artist, pos, updated_at = get_media_player_info(hass, entity_id, entry_id)
