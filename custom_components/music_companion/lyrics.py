@@ -609,18 +609,6 @@ async def send_lyrics_to_display_device(hass: HomeAssistant, display_device: str
         _LOGGER.error("Failed to send lyrics to display device %s (device: %s): %s", display_device, entry_id, e)
 
 
-async def update_lyrics_display(hass: HomeAssistant, previous_line: str, current_line: str, next_line: str, entry_id: str = None):
-    """Update the lyrics display - ALWAYS update text entities, optionally display device."""
-    # ALWAYS update text entities first (this is the primary display method)
-    await update_lyrics_input_text(hass, previous_line, current_line, next_line, entry_id)
-    
-    # Check if device is ALSO configured to use display device
-    config_data = get_device_config_data(hass, entry_id)
-    if config_data and config_data.get(CONF_USE_DISPLAY_DEVICE, False):
-        display_device = config_data.get(CONF_DISPLAY_DEVICE)
-        if display_device and display_device != "none":
-            await send_lyrics_to_display_device(hass, display_device, previous_line, current_line, next_line, entry_id)
-
 async def update_lyrics_input_text(hass: HomeAssistant, previous_line: str, current_line: str, next_line: str, entry_id: str = None):
     """Update the text entities with the current lyrics lines."""
     lyrics_entities = get_device_lyrics_entities(hass, entry_id)
@@ -862,6 +850,27 @@ async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, p
     await device_data[DEVICE_DATA_LYRICS_SYNC].start(entity_id, timeline, lrc, pos, updated_at, audiofingerprint)
 
 
+async def trigger_lyrics_lookup(hass: HomeAssistant, title: str, artist: str, play_offset_ms: int, process_begin: str, entry_id=None):
+    """Trigger lyrics lookup based on a recognized song."""
+
+    if not title or not artist:
+        _LOGGER.warning("Trigger Lyrics: Cannot trigger lyrics lookup: Missing title or artist (device: %s).", entry_id)
+        return
+
+    _LOGGER.info("Trigger Lyrics (from tagging) -> Artist: %s Title: %s, Entry ID: %s", artist, title, entry_id)
+
+    # Get the configured media player entity ID
+    from .tagging import get_tagging_config
+    conf = get_tagging_config(hass, entry_id)
+    if not conf:
+        _LOGGER.error("No configuration found for entry_id: %s", entry_id)
+        return
+        
+    media_player = conf["media_player"]
+
+    clean_track = clean_track_name(title)
+    await fetch_lyrics_for_track(hass, clean_track, artist, play_offset_ms/1000, process_begin, media_player, True, entry_id)
+
 
 async def handle_fetch_lyrics(hass: HomeAssistant, call: ServiceCall):
     """Main service handler: gets media info and fetches lyrics."""
@@ -954,7 +963,7 @@ async def handle_fetch_lyrics(hass: HomeAssistant, call: ServiceCall):
                     hass.async_create_task(fetch_lyrics_for_track(hass, track, artist, pos, updated_at, entity, False, entry_id))
             else:
                 _LOGGER.info("Monitor Playback: Track already processed. Skipping lyrics fetch (device: %s).", entry_id)
-        # Playing, radio - NEW: Show message instead of fetching lyrics
+        # Playing, radio - Show message instead of fetching lyrics
         elif new_state.state == "playing" and media_content_id.startswith("library://radio"):
             device_data[DEVICE_DATA_LAST_MEDIA_CONTENT_ID] = media_content_id
             _LOGGER.info("Monitor Playback: Radio station detected - not fetching lyrics automatically (device: %s).", entry_id)
