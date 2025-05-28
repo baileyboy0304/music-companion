@@ -793,10 +793,15 @@ async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, p
     lyrics_provider = [lrc_kit.QQProvider]
     provider = lrc_kit.ComboLyricsProvider(lyrics_provider)
     
-    # Try with the combined artist name first
-    _LOGGER.info("Fetch: Searching for lyrics with combined artist name (device: %s).", entry_id)
-    search_request = await hass.async_add_executor_job(lrc_kit.SearchRequest, artist, track)
-    lyrics_result = await hass.async_add_executor_job(provider.search, search_request)
+    # Function to try searching with given artist and track
+    async def try_search(search_artist: str, search_track: str, description: str):
+        """Helper function to try searching with specific artist/track combination."""
+        _LOGGER.info("Fetch: %s (device: %s)", description, entry_id)
+        search_request = await hass.async_add_executor_job(lrc_kit.SearchRequest, search_artist, search_track)
+        return await hass.async_add_executor_job(provider.search, search_request)
+    
+    # Try with the original artist and track first
+    lyrics_result = await try_search(artist, track, "Searching for lyrics with original artist/track")
     
     # If no lyrics found and artist contains separators, try with individual artists
     if not lyrics_result:
@@ -820,17 +825,51 @@ async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, p
             
             # Try each individual artist
             for single_artist in artist_list:
-                _LOGGER.info("Fetch: Trying with artist: %s (device: %s)", single_artist, entry_id)
-                search_request = await hass.async_add_executor_job(lrc_kit.SearchRequest, single_artist, track)
-                lyrics_result = await hass.async_add_executor_job(provider.search, search_request)
+                lyrics_result = await try_search(single_artist, track, f"Trying with individual artist: {single_artist}")
                 
                 if lyrics_result:
-                    _LOGGER.info("Fetch: Lyrics found with artist: %s (device: %s)", single_artist, entry_id)
+                    _LOGGER.info("Fetch: Lyrics found with individual artist: %s (device: %s)", single_artist, entry_id)
                     break
+    
+    # NEW: If still no lyrics found, try swapping artist and track
+    # This handles cases where Music Assistant metadata is swapped for radio stations
+    if not lyrics_result:
+        _LOGGER.info("Fetch: No lyrics found with original order. Trying swapped artist/track (device: %s)", entry_id)
+        
+        # Try with swapped fields
+        lyrics_result = await try_search(track, artist, "Searching with swapped artist/track (track as artist, artist as track)")
+        
+        if lyrics_result:
+            _LOGGER.info("Fetch: SUCCESS! Lyrics found with swapped artist/track - appears metadata was swapped (device: %s)", entry_id)
+            # Log the corrected information for debugging
+            _LOGGER.info("Fetch: Corrected artist: %s, Corrected track: %s (device: %s)", track, artist, entry_id)
+        else:
+            # If swapping didn't work either, try splitting the swapped artist as well
+            separators = ["/", "|", "&", ",", " and ", " with ", " feat ", " feat. ", " ft ", " ft. ", " featuring "]
+            contains_separator = any(sep in track for sep in separators)
+            
+            if contains_separator:
+                _LOGGER.info("Fetch: Trying swapped fields with individual artists from track field (device: %s)", entry_id)
+                
+                # Split the track string (which we're now treating as artist) using separators
+                individual_artists = track
+                for sep in separators:
+                    if sep in individual_artists:
+                        individual_artists = individual_artists.replace(sep, "|")
+                
+                artist_list = [a.strip() for a in individual_artists.split("|") if a.strip()]
+                
+                # Try each individual artist from the track field
+                for single_artist in artist_list:
+                    lyrics_result = await try_search(single_artist, artist, f"Trying swapped with individual artist from track field: {single_artist}")
+                    
+                    if lyrics_result:
+                        _LOGGER.info("Fetch: SUCCESS! Lyrics found with swapped individual artist: %s (device: %s)", single_artist, entry_id)
+                        break
     
     # If still no lyrics found
     if not lyrics_result:
-        _LOGGER.warning("Fetch: No lyrics found for '%s' (device: %s).", track, entry_id)
+        _LOGGER.warning("Fetch: No lyrics found for '%s' by '%s' (tried original, individual artists, and swapped variants) (device: %s)", track, artist, entry_id)
         await update_lyrics_display(hass, "", "No lyrics found", "", entry_id)
         return
 
