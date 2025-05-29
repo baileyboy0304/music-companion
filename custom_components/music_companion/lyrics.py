@@ -548,35 +548,42 @@ async def update_lyrics_entities(hass: HomeAssistant, previous_line: str, curren
         _LOGGER.error("Could not find lyrics entities for entry_id: %s", entry_id)
         return
     
-    # Verify all entities exist and are available
-    missing_entities = []
+    # Check which entities exist and are available
+    available_entities = {}
     for line_name, entity_id in lyrics_entities.items():
         state = hass.states.get(entity_id)
         if not state:
-            missing_entities.append(entity_id)
+            _LOGGER.warning("Lyrics entity %s does not exist", entity_id)
         elif state.state == "unavailable":
-            _LOGGER.warning("Lyrics entity %s is unavailable", entity_id)
+            _LOGGER.debug("Lyrics entity %s is unavailable, skipping", entity_id)
+        else:
+            available_entities[line_name] = entity_id
     
-    if missing_entities:
-        _LOGGER.error("Lyrics entities missing: %s", missing_entities)
+    if not available_entities:
+        _LOGGER.warning("No available lyrics entities found for entry_id: %s", entry_id)
         return
     
-    # Update the entities
+    # Update only the available entities
     try:
-        await hass.services.async_call("text", "set_value", {
-            "entity_id": lyrics_entities["line1"], 
-            "value": previous_line
-        })
-        await hass.services.async_call("text", "set_value", {
-            "entity_id": lyrics_entities["line2"], 
-            "value": current_line
-        })
-        await hass.services.async_call("text", "set_value", {
-            "entity_id": lyrics_entities["line3"], 
-            "value": next_line
-        })
+        if "line1" in available_entities:
+            await hass.services.async_call("text", "set_value", {
+                "entity_id": available_entities["line1"], 
+                "value": previous_line
+            })
         
-        _LOGGER.debug("Successfully updated lyrics for entry_id: %s", entry_id)
+        if "line2" in available_entities:
+            await hass.services.async_call("text", "set_value", {
+                "entity_id": available_entities["line2"], 
+                "value": current_line
+            })
+        
+        if "line3" in available_entities:
+            await hass.services.async_call("text", "set_value", {
+                "entity_id": available_entities["line3"], 
+                "value": next_line
+            })
+        
+        _LOGGER.debug("Successfully updated %d lyrics entities for entry_id: %s", len(available_entities), entry_id)
         
     except Exception as e:
         _LOGGER.error("Error updating lyrics entities for entry_id %s: %s", entry_id, e)
