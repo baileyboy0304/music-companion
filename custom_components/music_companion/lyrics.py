@@ -464,13 +464,11 @@ class LyricsSynchronizer:
                             # If no matching line found, check if we're past the end
                             if not found_line:
                                 if position_ms < self.timeline[0]:
-                                    # Before first line
-                                    #await update_lyrics_entities(self.hass, "", 
-                                    #                          "Coming up...", self.lyrics[0], self.entry_id)
+                                    # Before first line - do nothing (commented out status messages)
+                                    pass
                                 elif position_ms >= self.timeline[-1]:
-                                    # Past the last line
-                                    #await update_lyrics_entities(self.hass, 
-                                    #                          self.lyrics[-1], "End of lyrics", "", self.entry_id)
+                                    # Past the last line - do nothing (commented out status messages)
+                                    pass
                                 else:
                                     # We should have found a line - try to recover
                                     # Find the closest line
@@ -490,7 +488,7 @@ class LyricsSynchronizer:
                         else:
                             # If we have lyrics but no timeline yet, or in initialization
                             if len(self.lyrics) > 0:
-                                #await update_lyrics_entities(self.hass, "", "Loading lyrics...", self.lyrics[0], self.entry_id)
+                                # Commented out loading message
                                 self.last_update_time = current_time
         except asyncio.CancelledError:
             _LOGGER.debug("LyricsSynchronizer: Force update task cancelled (device: %s)", self.entry_id)
