@@ -695,10 +695,13 @@ async def fetch_lyrics_for_track(hass: HomeAssistant, track: str, artist: str, p
     await update_lyrics_entities(hass, "", "Searching for lyrics...", "", entry_id)
 
     # Handle first track after startup - ignore position data
-    if _INTEGRATION_JUST_STARTED:
+    if _INTEGRATION_JUST_STARTED and not audiofingerprint:
         _LOGGER.info("Fetch: First track after startup - ignoring position data (device: %s)", entry_id)
         pos = None
         updated_at = None
+        _INTEGRATION_JUST_STARTED = False
+    elif _INTEGRATION_JUST_STARTED and audiofingerprint:
+        _LOGGER.info("Fetch: First track after startup but from audio fingerprinting - using position data (device: %s)", entry_id)
         _INTEGRATION_JUST_STARTED = False
 
     # Get current track info
