@@ -47,39 +47,50 @@ def infer_tagging_switch_from_assist_satellite(hass, assist_satellite_entity):
         
         # Find the assist satellite entity in the registry
         assist_entity = entity_registry.async_get(assist_satellite_entity)
-        if not assist_entity or not assist_entity.device_id:
-            return None, f"Assist satellite entity '{assist_satellite_entity}' not found or has no device"
+        if not assist_entity:
+            return None, "Assist satellite entity not found in registry"
         
-        # Get the device
-        device = device_registry.async_get(assist_entity.device_id)
-        if not device:
-            return None, f"Device not found for assist satellite"
+        # Get device ID for the assist satellite
+        assist_device_id = assist_entity.device_id
+        if not assist_device_id:
+            return None, "Assist satellite entity has no device association"
+
+        # Search for a switch entity on the same device that looks like a tagging enable switch
+        candidates = []
+        for entry in entity_registry.entities.values():
+            if entry.platform == "switch" and entry.device_id == assist_device_id:
+                # We look for entity_id containing 'tagging_enable'
+                if "tagging_enable" in entry.entity_id:
+                    candidates.append(entry.entity_id)
         
-        # Find all entities belonging to this device
-        device_entities = er.async_entries_for_device(entity_registry, assist_entity.device_id)
+        # If we found candidates, prefer the one that matches the base name of the satellite
+        if candidates:
+            # Try to find the best match by comparing base name patterns
+            try:
+                base = assist_satellite_entity.split(".", 1)[1]
+                base = base.replace("_assist_satellite", "")
+            except Exception:
+                base = None
+            
+            if base:
+                for c in candidates:
+                    if base in c:
+                        return c, None
+            
+            # Otherwise return the first candidate
+            return candidates[0], None
         
-        # Look for a switch entity with "tagging_enable" in the name
-        for entity in device_entities:
-            if (entity.domain == "switch" and 
-                "tagging_enable" in entity.entity_id and 
-                entity.disabled_by is None):  # Make sure it's not disabled
-                
-                # Verify the switch actually exists in the state registry
-                if hass.states.get(entity.entity_id):
-                    return entity.entity_id, None
-        
-        # If we get here, no tagging switch was found on this device
-        switch_entities = [e.entity_id for e in device_entities if e.domain == "switch"]
-        return None, f"No tagging switch found on device. Available switches: {switch_entities}"
-        
+        return None, "No tagging switch found on the same device"
     except Exception as e:
-        return None, f"Error looking up device entities: {str(e)}"
+        _LOGGER.warning("Error inferring tagging switch: %s", e)
+        return None, "Error inferring tagging switch: %s" % e
+
 
 def get_devices_for_domain(hass: HomeAssistant, domain: str):
-    """Get devices for a specific domain."""
+    """Return a list of device entries that have entities from the specified domain."""
     try:
         device_registry = dr.async_get(hass)
-        config_entries = hass.config_entries
+        entity_registry = er.async_get(hass)
         
         matching_devices = []
         
@@ -113,61 +124,54 @@ def get_display_device_options(hass: HomeAssistant):
             
             # Try different possible keys for browser IDs
             possible_keys = ["va_browser_ids", "browser_ids", "browsers", "devices"]
-            va_browser_ids = {}
-            
             for key in possible_keys:
-                if key in view_assist_data:
-                    va_browser_ids = view_assist_data[key]
-                    _LOGGER.debug("Found browser IDs under key '%s': %s", key, va_browser_ids)
+                if isinstance(view_assist_data, dict) and key in view_assist_data:
+                    browsers = view_assist_data[key]
+                    _LOGGER.debug("Found browsers list under key '%s': %s", key, browsers)
+                    if isinstance(browsers, dict):
+                        for browser_id, info in browsers.items():
+                            name = info.get("name") or info.get("friendly_name") or browser_id
+                            display_devices[browser_id] = f"View Assist: {name}"
+                    elif isinstance(browsers, list):
+                        for browser_id in browsers:
+                            display_devices[browser_id] = f"View Assist: {browser_id}"
                     break
-            
-            if va_browser_ids:
-                _LOGGER.debug("View Assist browser IDs found: %s", list(va_browser_ids.keys()))
-                for device_id, device_name in va_browser_ids.items():
-                    display_devices[device_id] = f"View Assist: {device_name}"
-            else:
-                _LOGGER.debug("No browser IDs found in View Assist data")
-                
         except Exception as e:
-            _LOGGER.debug("Error getting View Assist browser IDs: %s", e)
-    else:
-        _LOGGER.debug("View Assist domain not found in hass.data. Available domains: %s", 
-                     [key for key in hass.data.keys() if not key.startswith('_')])
-    
-    # Check for View Assist entities in the entity registry
+            _LOGGER.debug("Error reading View Assist data: %s", e)
+
+    # Fallback: try to discover devices via an internal helper in View Assist
     try:
-        entity_registry = er.async_get(hass)
-        view_assist_entities = [
-            entity for entity in entity_registry.entities.values()
-            if entity.platform == VIEW_ASSIST_DOMAIN
-        ]
-        
-        _LOGGER.debug("Found %d View Assist entities", len(view_assist_entities))
-        
-        if view_assist_entities:
-            device_registry = dr.async_get(hass)
-            for entity in view_assist_entities:
-                if entity.device_id:
-                    device = device_registry.async_get(entity.device_id)
-                    if device and device.id not in display_devices:
-                        device_name = device.name or f"View Assist Device {entity.device_id[:8]}"
-                        display_devices[device.id] = f"View Assist: {device_name}"
-                        _LOGGER.debug("Added View Assist device from entity registry: %s -> %s", device.id, device_name)
-                        
+        view_assist = hass.data.get(VIEW_ASSIST_DOMAIN)
+        if view_assist and hasattr(view_assist, "get_registered_browsers"):
+            browsers = view_assist.get_registered_browsers()
+            _LOGGER.debug("View Assist get_registered_browsers returned: %s", browsers)
+            if isinstance(browsers, dict):
+                for browser_id, name in browsers.items():
+                    display_devices[browser_id] = f"View Assist: {name}"
     except Exception as e:
-        _LOGGER.debug("Error checking View Assist entities: %s", e)
-    
-    # Add Remote Assist Display devices from device registry
-    try:
-        remote_display_devices = get_devices_for_domain(hass, REMOTE_ASSIST_DISPLAY_DOMAIN)
-        _LOGGER.debug("Found %d Remote Assist Display devices", len(remote_display_devices))
-        for device in remote_display_devices:
-            if device.id not in display_devices:
-                device_name = device.name or f"Remote Display {device.id[:8]}"
-                display_devices[device.id] = f"Remote Display: {device_name}"
-                _LOGGER.debug("Added Remote Assist Display device: %s -> %s", device.id, device_name)
-    except Exception as e:
-        _LOGGER.debug("Error getting Remote Assist Display devices: %s", e)
+        _LOGGER.debug("Error calling View Assist helper: %s", e)
+
+    # Try Remote Assist Display domain if present
+    if REMOTE_ASSIST_DISPLAY_DOMAIN in hass.data:
+        _LOGGER.debug("Remote Assist Display domain found in hass.data")
+        try:
+            remote_display_data = hass.data[REMOTE_ASSIST_DISPLAY_DOMAIN]
+            _LOGGER.debug("Remote Assist Display keys: %s", list(remote_display_data.keys()) if isinstance(remote_display_data, dict) else "Not a dict")
+            
+            possible_keys = ["devices", "registered_displays", "screens"]
+            for key in possible_keys:
+                if isinstance(remote_display_data, dict) and key in remote_display_data:
+                    displays = remote_display_data[key]
+                    if isinstance(displays, dict):
+                        for display_id, info in displays.items():
+                            name = info.get("name") or info.get("friendly_name") or display_id
+                            display_devices[display_id] = f"Remote Assist Display: {name}"
+                    elif isinstance(displays, list):
+                        for display_id in displays:
+                            display_devices[display_id] = f"Remote Assist Display: {display_id}"
+                    break
+        except Exception as e:
+            _LOGGER.debug("Error getting Remote Assist Display devices: %s", e)
     
     # Check for any other display-related integrations
     try:
@@ -180,7 +184,8 @@ def get_display_device_options(hass: HomeAssistant):
         
         for pattern in display_entity_patterns:
             matching_entities = [
-                entity_id for entity_id in hass.states.async_entity_ids()
+                entity_id for entity_id in 
+                hass.states.async_entity_ids()
                 if entity_id.startswith(pattern)
             ]
             
@@ -196,73 +201,56 @@ def get_display_device_options(hass: HomeAssistant):
                         display_devices[entity_id] = f"Display Entity: {friendly_name}"
                         
     except Exception as e:
-        _LOGGER.debug("Error checking for display entities: %s", e)
-    
-    # Always add none option first
-    ordered_devices = {"none": "None (use text entities only)"}
-    
-    # Add found devices
-    ordered_devices.update(display_devices)
-    
-    # Add dummy if no real devices found
-    if len(ordered_devices) == 1:  # Only "none" option
-        ordered_devices["dummy"] = "dummy (no display devices found)"
-    
-    _LOGGER.debug("Final available display devices: %s", list(ordered_devices.keys()))
-    return ordered_devices
+        _LOGGER.debug("Error during generic display entity discovery: %s", e)
+
+    if not display_devices:
+        # Always include a dummy value so the selector renders
+        display_devices["dummy"] = "No display devices found"
+
+    return display_devices
+
 
 class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for the integration."""
+
     VERSION = 1
-    CONNECTION_CLASS = "local_push"
-
-    def __init__(self):
-        """Initialize the config flow."""
-        self._master_config_exists = False
-
-    def _check_master_config(self):
-        """Check if master configuration already exists."""
-        if not self.hass:
-            return
-            
-        self._master_config_exists = False
-        for entry in self._async_current_entries():
-            if entry.data.get("entry_type") == ENTRY_TYPE_MASTER:
-                self._master_config_exists = True
-                break
 
     async def async_step_user(self, user_input=None):
-        """Handle the initial step."""
-        self._check_master_config()
-        
-        if not self._master_config_exists:
-            return await self.async_step_master_config()
-        else:
-            return await self.async_step_menu()
-
-    async def async_step_menu(self, user_input=None):
-        """Show menu for choosing setup type."""
-        if user_input is not None:
-            if user_input["setup_type"] == "master":
-                return await self.async_step_master_config()
-            elif user_input["setup_type"] == "device":
-                return await self.async_step_device()
-
-        self._check_master_config()
-        
-        return self.async_show_menu(
-            step_id="menu",
-            menu_options={
-                "device": "Add Device",
-                "master": "Update Master Configuration" if self._master_config_exists else "Setup Master Configuration"
-            }
-        )
-
-    async def async_step_master_config(self, user_input=None):
-        """Configure master settings."""
+        """Initial step: choose Master or Device configuration."""
         errors = {}
-        
+
         if user_input is not None:
-            # Check for existing master configuration
+            _LOGGER.debug("User selected config type: %s", user_input)
+            choice = user_input.get("config_type")
+            if choice == "master":
+                return await self.async_step_master()
+            elif choice == "device":
+                return await self.async_step_device()
+            else:
+                errors["base"] = "invalid_selection"
+
+        schema = vol.Schema({
+            vol.Required("config_type"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        {"value": "master", "label": "Master Configuration"},
+                        {"value": "device", "label": "Add Device"},
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        })
+
+        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+    async def async_step_master(self, user_input=None):
+        """Handle the master configuration step."""
+        errors = {}
+
+        if user_input is not None:
+            _LOGGER.debug("Master step input: %s", user_input)
+
+            # Before creating another master, remove any duplicates
             existing_master = None
             all_entries = self._async_current_entries()
             
@@ -279,6 +267,7 @@ class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else:
                         existing_master = entry
             
+            # Build data for the master entry
             data = {
                 **user_input,
                 "entry_type": ENTRY_TYPE_MASTER
@@ -299,42 +288,50 @@ class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 existing_data = entry.data
                 break
 
-        data_schema = vol.Schema({
-            vol.Required(CONF_ACRCLOUD_HOST, default=existing_data.get(CONF_ACRCLOUD_HOST, "")): cv.string,
-            vol.Required(CONF_HOME_ASSISTANT_UDP_PORT, default=existing_data.get(CONF_HOME_ASSISTANT_UDP_PORT, 6056)): cv.port,
-            vol.Required(CONF_ACRCLOUD_ACCESS_KEY, default=existing_data.get(CONF_ACRCLOUD_ACCESS_KEY, "")): cv.string,
-            vol.Required(CONF_ACRCLOUD_ACCESS_SECRET, default=existing_data.get(CONF_ACRCLOUD_ACCESS_SECRET, "")): cv.string,
-            vol.Required(CONF_SPOTIFY_CLIENT_ID, default=existing_data.get(CONF_SPOTIFY_CLIENT_ID, "")): cv.string,
-            vol.Required(CONF_SPOTIFY_CLIENT_SECRET, default=existing_data.get(CONF_SPOTIFY_CLIENT_SECRET, "")): cv.string,
+        schema = vol.Schema({
+            vol.Optional(CONF_ACRCLOUD_HOST, default=existing_data.get(CONF_ACRCLOUD_HOST, "")): cv.string,
+            vol.Optional(CONF_ACRCLOUD_ACCESS_KEY, default=existing_data.get(CONF_ACRCLOUD_ACCESS_KEY, "")): cv.string,
+            vol.Optional(CONF_ACRCLOUD_ACCESS_SECRET, default=existing_data.get(CONF_ACRCLOUD_ACCESS_SECRET, "")): cv.string,
+            vol.Optional(CONF_HOME_ASSISTANT_UDP_PORT, default=existing_data.get(CONF_HOME_ASSISTANT_UDP_PORT, 10699)): cv.positive_int,
+
+            vol.Optional(CONF_SPOTIFY_CLIENT_ID, default=existing_data.get(CONF_SPOTIFY_CLIENT_ID, "")): cv.string,
+            vol.Optional(CONF_SPOTIFY_CLIENT_SECRET, default=existing_data.get(CONF_SPOTIFY_CLIENT_SECRET, "")): cv.string,
             vol.Optional(CONF_SPOTIFY_PLAYLIST_ID, default=existing_data.get(CONF_SPOTIFY_PLAYLIST_ID, "")): cv.string,
             vol.Optional(CONF_SPOTIFY_CREATE_PLAYLIST, default=existing_data.get(CONF_SPOTIFY_CREATE_PLAYLIST, True)): cv.boolean,
             vol.Optional(CONF_SPOTIFY_PLAYLIST_NAME, default=existing_data.get(CONF_SPOTIFY_PLAYLIST_NAME, DEFAULT_SPOTIFY_PLAYLIST_NAME)): cv.string,
         })
 
-        return self.async_show_form(step_id="master_config", data_schema=data_schema, errors=errors)
+        return self.async_show_form(step_id="master", data_schema=schema, errors=errors)
 
     async def async_step_device(self, user_input=None):
-        """Configure individual device."""
+        """Handle the device configuration step."""
         errors = {}
-        
-        self._check_master_config()
-        if not self._master_config_exists:
-            return self.async_abort(reason="master_required")
+
+        # Build dynamic lists for selection
+        assist_satellites = []
+        media_players = []
+
+        # Collect assist satellites and media players from states
+        for state in self.hass.states.async_all():
+            try:
+                if state.entity_id.startswith("assist_satellite."):
+                    assist_satellites.append(state.entity_id)
+                elif state.entity_id.startswith("media_player."):
+                    media_players.append(state.entity_id)
+            except Exception:
+                continue
         
         if user_input is not None:
-            device_name = user_input[CONF_DEVICE_NAME]
-            assist_satellite = user_input[CONF_ASSIST_SATELLITE_ENTITY]
-            media_player = user_input[CONF_MEDIA_PLAYER_ENTITY]
+            device_name = user_input.get(CONF_DEVICE_NAME, "")
+            assist_satellite = user_input.get(CONF_ASSIST_SATELLITE_ENTITY, "")
+            media_player = user_input.get(CONF_MEDIA_PLAYER_ENTITY, "")
             use_display_device = user_input.get(CONF_USE_DISPLAY_DEVICE, False)
-            display_device = user_input.get(CONF_DISPLAY_DEVICE) if use_display_device else None
-            
-            # Check for duplicate device names
-            for entry in self._async_current_entries():
-                if (entry.data.get("entry_type") == ENTRY_TYPE_DEVICE and 
-                    entry.data.get(CONF_DEVICE_NAME) == device_name):
-                    errors[CONF_DEVICE_NAME] = "name_exists"
-                    break
-            
+            display_device = user_input.get(CONF_DISPLAY_DEVICE)
+
+            # Basic validation
+            if not device_name:
+                errors[CONF_DEVICE_NAME] = "required"
+
             if not errors:
                 # Validate assist satellite entity
                 if not assist_satellite.startswith("assist_satellite."):
@@ -365,37 +362,25 @@ class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     base_name = assist_satellite[17:-17] if assist_satellite.endswith("_assist_satellite") else ""
                     
                     data = {
-                        "device_name": device_name,
-                        "assist_satellite_entity": assist_satellite,
-                        "media_player_entity": media_player,
-                        "base_name": base_name,
-                        "tagging_enabled": tagging_enabled,
-                        "use_display_device": use_display_device,
                         "entry_type": ENTRY_TYPE_DEVICE,
+                        CONF_DEVICE_NAME: device_name,
+                        CONF_ASSIST_SATELLITE_ENTITY: assist_satellite,
+                        CONF_MEDIA_PLAYER_ENTITY: media_player,
+                        # Tagging capability will be set based on inference
+                        "tagging_enabled": tagging_switch is not None,
+                        "tagging_switch_entity": tagging_switch if tagging_switch else None,
+                        # Display options
+                        CONF_USE_DISPLAY_DEVICE: use_display_device,
+                        CONF_DISPLAY_DEVICE: display_device if use_display_device else None,
+                        "base_name": base_name,
                     }
-                    
-                    # Only add tagging switch if it exists
-                    if tagging_enabled and tagging_switch:
-                        data["tagging_switch_entity"] = tagging_switch
-                    
-                    # Only add display device if enabled and valid
-                    if use_display_device and display_device and display_device != "none":
-                        data[CONF_DISPLAY_DEVICE] = display_device
-                    
-                    # Log the device creation for debugging
-                    _LOGGER.info("Creating device entry: %s with tagging enabled: %s, display device: %s", 
-                               device_name, tagging_enabled, display_device if use_display_device else "None")
-                    if tagging_enabled:
-                        _LOGGER.info("Tagging switch: %s", tagging_switch)
-                    else:
-                        _LOGGER.info("Device will support lyrics display only (no audio tagging)")
-                    
-                    return self.async_create_entry(title=device_name, data=data)
 
-        # Get available assist satellites and media players
+                    title = f"Device: {device_name}"
+                    return self.async_create_entry(title=title, data=data)
+
+        # Rebuild lists on every show
         assist_satellites = []
         media_players = []
-        
         for state in self.hass.states.async_all():
             if state.entity_id.startswith("assist_satellite."):
                 assist_satellites.append(state.entity_id)
@@ -424,3 +409,46 @@ class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         })
 
         return self.async_show_form(step_id="device", data_schema=data_schema, errors=errors)
+
+
+class MusicCompanionOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for Music Companion."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry):
+        self.config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        """Manage the options for the master entry (Spotify/ACR)."""
+        # Only expose options on the MASTER entry
+        entry_type = self.config_entry.data.get("entry_type")
+        if entry_type != ENTRY_TYPE_MASTER:
+            # Nothing to configure for device entries
+            return self.async_create_entry(title="", data={})
+
+        data = dict(self.config_entry.data)
+
+        if user_input is not None:
+            # Merge user_input into data (this integration reads from data, not options)
+            data.update(user_input)
+            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+            return self.async_create_entry(title="Updated", data={})
+
+        schema = vol.Schema({
+            # ACRCloud
+            vol.Optional(CONF_ACRCLOUD_HOST, default=data.get(CONF_ACRCLOUD_HOST, "")): str,
+            vol.Optional(CONF_ACRCLOUD_ACCESS_KEY, default=data.get(CONF_ACRCLOUD_ACCESS_KEY, "")): str,
+            vol.Optional(CONF_ACRCLOUD_ACCESS_SECRET, default=data.get(CONF_ACRCLOUD_ACCESS_SECRET, "")): str,
+            vol.Optional(CONF_HOME_ASSISTANT_UDP_PORT, default=data.get(CONF_HOME_ASSISTANT_UDP_PORT, 10699)): int,
+
+            # Spotify
+            vol.Optional(CONF_SPOTIFY_CLIENT_ID, default=data.get(CONF_SPOTIFY_CLIENT_ID, "")): str,
+            vol.Optional(CONF_SPOTIFY_CLIENT_SECRET, default=data.get(CONF_SPOTIFY_CLIENT_SECRET, "")): str,
+            vol.Optional(CONF_SPOTIFY_PLAYLIST_ID, default=data.get(CONF_SPOTIFY_PLAYLIST_ID, "")): str,
+            vol.Optional(CONF_SPOTIFY_CREATE_PLAYLIST, default=data.get(CONF_SPOTIFY_CREATE_PLAYLIST, True)): bool,
+            vol.Optional(CONF_SPOTIFY_PLAYLIST_NAME, default=data.get(CONF_SPOTIFY_PLAYLIST_NAME, DEFAULT_SPOTIFY_PLAYLIST_NAME)): str,
+        })
+
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+async def async_get_options_flow(config_entry):
+    return MusicCompanionOptionsFlowHandler(config_entry)
