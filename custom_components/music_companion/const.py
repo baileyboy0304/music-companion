@@ -38,7 +38,8 @@ REMOTE_ASSIST_DISPLAY_DOMAIN = "remote_assist_display"
 SPOTIFY_AUTH_CALLBACK_PATH = "/api/music_companion/spotify_callback"
 SPOTIFY_STORAGE_VERSION = 1
 SPOTIFY_STORAGE_KEY = "spotify_tokens"
-SPOTIFY_SCOPE = "playlist-modify-private playlist-modify-public user-read-private"
+#SPOTIFY_SCOPE = "playlist-modify-private playlist-modify-public user-read-private"
+SPOTIFY_SCOPE = "playlist-modify-private playlist-modify-public playlist-read-private user-read-private"
 DEFAULT_SPOTIFY_PLAYLIST_NAME = "Home Assistant Music Discoveries"
 
 # Device data structure keys
