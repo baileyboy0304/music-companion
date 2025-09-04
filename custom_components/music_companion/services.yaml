@@ -19,7 +19,7 @@ fetch_audio_tag:
     add_to_spotify:
       description: "Add the discovered song to your Spotify playlist"
       example: true
-      default: true
+      default: false
       selector:
         boolean:
     tagging_switch_entity_id:
