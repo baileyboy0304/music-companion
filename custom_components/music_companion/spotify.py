@@ -2,8 +2,14 @@ import json
 import logging
 import urllib.parse
 import aiohttp
+from aiohttp import web
 import asyncio
 import time
+import os
+import base64
+import hashlib
+from typing import Optional
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
@@ -39,6 +45,22 @@ SERVICE_ADD_TO_SPOTIFY_SCHEMA = vol.Schema({
     vol.Optional("spotify_id"): cv.string,
 })
 
+# ---------------- PKCE helpers (optional; safe even if not used) ----------------
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _new_code_verifier() -> str:
+    # 43–128 chars; 64 bytes → 86 chars
+    return _b64url(os.urandom(64))
+
+
+def _code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return _b64url(digest)
+
+
 # -------------------------------------------------
 # OAuth callback view
 # -------------------------------------------------
@@ -58,7 +80,7 @@ class SpotifyAuthView(HomeAssistantView):
 
             if error:
                 _LOGGER.error("Spotify authentication error: %s", error)
-                return aiohttp.web.Response(
+                return web.Response(
                     text=f"<html><body><h1>Authentication Error</h1><p>{error}</p></body></html>",
                     content_type="text/html",
                     status=400,
@@ -66,7 +88,7 @@ class SpotifyAuthView(HomeAssistantView):
 
             if not code:
                 _LOGGER.error("No authorization code received")
-                return aiohttp.web.Response(
+                return web.Response(
                     text="<html><body><h1>Error</h1><p>No authorization code received</p></body></html>",
                     content_type="text/html",
                     status=400,
@@ -75,7 +97,7 @@ class SpotifyAuthView(HomeAssistantView):
             spotify_service = self.hass.data.get("spotify_service")
             if not spotify_service:
                 _LOGGER.error("Spotify service not initialized")
-                return aiohttp.web.Response(
+                return web.Response(
                     text="<html><body><h1>Setup Error</h1><p>Spotify service not initialized</p></body></html>",
                     content_type="text/html",
                     status=500,
@@ -83,25 +105,26 @@ class SpotifyAuthView(HomeAssistantView):
 
             success = await spotify_service.exchange_code(code)
             if success:
-                return aiohttp.web.Response(
+                return web.Response(
                     text="<html><body><h1>Authentication Successful</h1><p>You can close this window now</p></body></html>",
                     content_type="text/html",
                     status=200,
                 )
             else:
                 _LOGGER.error("Failed to exchange authorization code")
-                return aiohttp.web.Response(
+                return web.Response(
                     text="<html><body><h1>Authentication Failed</h1><p>Unable to complete Spotify authorization</p></body></html>",
                     content_type="text/html",
                     status=500,
                 )
         except Exception as e:
             _LOGGER.exception("Unexpected error in Spotify auth callback: %s", e)
-            return aiohttp.web.Response(
+            return web.Response(
                 text=f"<html><body><h1>Unexpected Error</h1><p>{str(e)}</p></body></html>",
                 content_type="text/html",
                 status=500,
             )
+
 
 # -------------------------------------------------
 # Spotify service
@@ -117,15 +140,25 @@ class SpotifyService:
         self.create_playlist = config.get("create_playlist", True)
         self.playlist_name = config.get("playlist_name", DEFAULT_SPOTIFY_PLAYLIST_NAME)
         self.session = async_get_clientsession(hass)
-        self.user_id = None
+        self.user_id: Optional[str] = None
         self.authorized = False
         self._lock = asyncio.Lock()
+        self._pkce_verifier: Optional[str] = None
 
         # token storage
         self.store = Store(hass, SPOTIFY_STORAGE_VERSION, f"{DOMAIN}_{SPOTIFY_STORAGE_KEY}")
-        self.access_token = None
-        self.refresh_token = None
+        self.access_token: Optional[str] = None
+        self.refresh_token: Optional[str] = None
         self.expires_at = 0  # epoch seconds
+
+    def _get_base_url(self) -> str:
+        """Return best base URL for OAuth redirect."""
+        # Prefer HA External URL if set; else Internal URL; else a last-ditch fallback.
+        base = self.hass.config.external_url or self.hass.config.internal_url
+        if not base:
+            # Final fallback keeps old behavior; change if your network can’t resolve this.
+            base = "http://homeassistant.local:8123"
+        return base.rstrip("/")
 
     async def async_setup(self):
         """Initialize from storage and verify by talking to Spotify."""
@@ -141,30 +174,30 @@ class SpotifyService:
         # Final verification: actually hit Spotify /me
         ok = await self._probe_current_user()
         if ok:
-            _LOGGER.info("Spotify auth verified with live API; user=%s, playlist_id=%s", self.user_id, self.playlist_id)
+            _LOGGER.info(
+                "Spotify auth verified with live API; user=%s, playlist_id=%s",
+                self.user_id,
+                self.playlist_id,
+            )
             self.authorized = True
         else:
             self.authorized = False
-            _LOGGER.warning("Spotify not authorized. Use the authorize link when prompted before adding tracks.")
+            _LOGGER.warning(
+                "Spotify not authorized. Use the authorize link when prompted before adding tracks."
+            )
 
         # Log current playlist state without implying success
         if self.playlist_id:
-            _LOGGER.info("Using existing playlist id (not yet validated this run): %s", self.playlist_id)
+            _LOGGER.info(
+                "Using existing playlist id (not yet validated this run): %s",
+                self.playlist_id,
+            )
         else:
             _LOGGER.info("No playlist ID configured; will create/find one on first use.")
 
         return self.authorized
 
     # ---------------- Token helpers ----------------
-    def _get_base_url(self) -> str:
-    """Return best base URL for OAuth redirect."""
-    # Prefer HA External URL if set; else Internal URL; else a last-ditch fallback.
-    base = self.hass.config.external_url or self.hass.config.internal_url
-    if not base:
-        # Final fallback keeps old behavior; change if your network can’t resolve this.
-        base = "http://homeassistant.local:8123"
-    return base.rstrip("/")
-
     async def load_tokens(self):
         data = await self.store.async_load()
         if data:
@@ -193,20 +226,26 @@ class SpotifyService:
 
     # ---------------- OAuth URLs ----------------
     def get_authorize_url(self):
-    base_url = self._get_base_url()
-    redirect_uri = f"{base_url}{SPOTIFY_AUTH_CALLBACK_PATH}"
-    params = {
-        "client_id": self.client_id,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": SPOTIFY_SCOPE,
-        "show_dialog": "true",
-    }
-    auth_url = f"https://accounts.spotify.com/authorize?{urllib.parse.urlencode(params)}"
-    _LOGGER.info("Generated Spotify Authorization URL: %s", auth_url)
-    _LOGGER.info("Redirect URI used: %s", redirect_uri)
-    return auth_url
+        base_url = self._get_base_url()
+        redirect_uri = f"{base_url}{SPOTIFY_AUTH_CALLBACK_PATH}"
 
+        # PKCE: generate on each auth URL build
+        self._pkce_verifier = _new_code_verifier()
+        challenge = _code_challenge(self._pkce_verifier)
+
+        params = {
+            "client_id": self.client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "scope": SPOTIFY_SCOPE,
+            "code_challenge_method": "S256",
+            "code_challenge": challenge,
+            "show_dialog": "true",
+        }
+        auth_url = f"https://accounts.spotify.com/authorize?{urllib.parse.urlencode(params)}"
+        _LOGGER.info("Generated Spotify Authorization URL: %s", auth_url)
+        _LOGGER.info("Redirect URI used: %s", redirect_uri)
+        return auth_url
 
     async def exchange_code(self, code: str) -> bool:
         redirect_uri = f"{self._get_base_url()}{SPOTIFY_AUTH_CALLBACK_PATH}"
@@ -215,7 +254,8 @@ class SpotifyService:
             "code": code,
             "redirect_uri": redirect_uri,
             "client_id": self.client_id,
-            "client_secret": self.client_secret,
+            # PKCE
+            "code_verifier": self._pkce_verifier or "",
         }
         try:
             _LOGGER.warning("Attempting to exchange code. Redirect URI: %s", redirect_uri)
@@ -330,7 +370,11 @@ class SpotifyService:
             # Try to find by name (requires read scope if private)
             for attempt in (1, 2):
                 params = {"limit": 50}
-                async with self.session.get("https://api.spotify.com/v1/me/playlists", headers=self._auth_headers(), params=params) as resp:
+                async with self.session.get(
+                    "https://api.spotify.com/v1/me/playlists",
+                    headers=self._auth_headers(),
+                    params=params,
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         for pl in data.get("items", []):
@@ -345,11 +389,18 @@ class SpotifyService:
                             return False
                         continue
                     # Other errors (403 if missing read scope)
-                    _LOGGER.warning("Could not list playlists (status %s). Will try to create.", resp.status)
+                    _LOGGER.warning(
+                        "Could not list playlists (status %s). Will try to create.",
+                        resp.status,
+                    )
                     break
 
             if self.create_playlist:
-                payload = {"name": self.playlist_name, "public": False, "description": "Added by Home Assistant"}
+                payload = {
+                    "name": self.playlist_name,
+                    "public": False,
+                    "description": "Added by Home Assistant",
+                }
                 for attempt in (1, 2):
                     async with self.session.post(
                         f"https://api.spotify.com/v1/users/{self.user_id}/playlists",
@@ -400,7 +451,7 @@ class SpotifyService:
                 return False
 
     # ---------------- Public API ----------------
-    async def add_track_to_playlist(self, title: str, artist: str, spotify_id: str | None) -> bool:
+    async def add_track_to_playlist(self, title: str, artist: str, spotify_id: Optional[str]) -> bool:
         """Add a track by ID or by search. Only report success after Spotify confirms."""
         async with self._lock:
             # Auth guard
@@ -516,10 +567,20 @@ async def handle_add_to_spotify(call):
 
     if not title or not artist:
         _LOGGER.error("No title or artist provided")
-        _LOGGER.error("Received data - Title: %s, Artist: %s, Spotify ID: %s", title, artist, spotify_id)
+        _LOGGER.error(
+            "Received data - Title: %s, Artist: %s, Spotify ID: %s",
+            title,
+            artist,
+            spotify_id,
+        )
         return
 
-    _LOGGER.info("add_to_spotify service called for: %s - %s, Spotify ID: %s", title, artist, spotify_id)
+    _LOGGER.info(
+        "add_to_spotify service called for: %s - %s, Spotify ID: %s",
+        title,
+        artist,
+        spotify_id,
+    )
 
     spotify_service = hass.data.get("spotify_service")
     if not spotify_service:
@@ -543,12 +604,17 @@ async def async_setup_spotify_service(hass, config):
 
         # Register the service regardless (adds will prompt to authorize if needed)
         hass.services.async_register(
-            DOMAIN, "add_to_spotify", handle_add_to_spotify, schema=SERVICE_ADD_TO_SPOTIFY_SCHEMA
+            DOMAIN,
+            "add_to_spotify",
+            handle_add_to_spotify,
+            schema=SERVICE_ADD_TO_SPOTIFY_SCHEMA,
         )
 
         if spotify_service.authorized:
             _LOGGER.info("Spotify service registered and verified with Spotify API")
         else:
-            _LOGGER.warning("Spotify service registered; waiting for user authorization to complete")
+            _LOGGER.warning(
+                "Spotify service registered; waiting for user authorization to complete"
+            )
     except Exception as e:
         _LOGGER.error("Failed to setup Spotify service: %s", e)
