@@ -489,7 +489,7 @@ class MusicCompanionOptionsFlowHandler(config_entries.OptionsFlow):
         # Only expose options on the MASTER entry
         entry_type = self.config_entry.data.get("entry_type")
         if entry_type != ENTRY_TYPE_MASTER:
-            # Nothing to configure for device entries
+            # Nothing to configure for device entries.
             return self.async_create_entry(title="", data={})
 
         data = dict(self.config_entry.data)
