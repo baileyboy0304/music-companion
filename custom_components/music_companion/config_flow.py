@@ -110,12 +110,12 @@ def get_devices_for_domain(hass: HomeAssistant, domain: str):
 
 
 def get_display_device_options(hass: HomeAssistant):
-    """Get available View Assist / Remote Assist display devices for selection."""
+    """Get available View Assist display devices for selection."""
     display_devices: dict[str, str] = {}
 
     _LOGGER.debug("Starting display device discovery...")
 
-    # View Assist: try domain data
+    # --- View Assist: try domain data (support dict and list like before)
     if VIEW_ASSIST_DOMAIN in hass.data:
         _LOGGER.debug("View Assist domain found in hass.data")
         try:
@@ -124,34 +124,37 @@ def get_display_device_options(hass: HomeAssistant):
                 "View Assist data keys: %s",
                 list(view_assist_data.keys()) if isinstance(view_assist_data, dict) else "Not a dict",
             )
-            for key in ("va_browser_ids", "browser_ids", "browsers", "devices"):
+
+            possible_keys = ("va_browser_ids", "browser_ids", "browsers", "devices")
+            for key in possible_keys:
                 if isinstance(view_assist_data, dict) and key in view_assist_data:
                     browsers = view_assist_data[key]
-                    _LOGGER.debug("Found browsers list under key '%s': %s", key, browsers)
+                    _LOGGER.debug("Found browsers list under key '%s': %s", key, type(browsers).__name__)
                     if isinstance(browsers, dict):
                         for browser_id, info in browsers.items():
-                            name = info.get("name") or info.get("friendly_name") or browser_id
+                            name = info.get("name") or info.get("friendly_name") or browser_id if isinstance(info, dict) else str(info)
                             display_devices[browser_id] = f"View Assist: {name}"
                     elif isinstance(browsers, list):
                         for browser_id in browsers:
-                            display_devices[browser_id] = f"View Assist: {browser_id}"
+                            display_devices[str(browser_id)] = f"View Assist: {browser_id}"
+                    # found a usable key — stop probing others
                     break
         except Exception as e:
             _LOGGER.debug("Error reading View Assist data: %s", e)
 
-    # View Assist: optional helper
+    # --- View Assist: optional helper (unchanged)
     try:
         view_assist = hass.data.get(VIEW_ASSIST_DOMAIN)
         if view_assist and hasattr(view_assist, "get_registered_browsers"):
             browsers = view_assist.get_registered_browsers()
-            _LOGGER.debug("View Assist get_registered_browsers returned: %s", browsers)
+            _LOGGER.debug("View Assist get_registered_browsers returned: %s", type(browsers).__name__)
             if isinstance(browsers, dict):
                 for browser_id, name in browsers.items():
                     display_devices[browser_id] = f"View Assist: {name}"
     except Exception as e:
         _LOGGER.debug("Error calling View Assist helper: %s", e)
 
-    # Remote Assist Display
+    # --- Remote Assist Display (unchanged)
     if REMOTE_ASSIST_DISPLAY_DOMAIN in hass.data:
         _LOGGER.debug("Remote Assist Display domain found in hass.data")
         try:
@@ -165,41 +168,39 @@ def get_display_device_options(hass: HomeAssistant):
                     displays = remote_display_data[key]
                     if isinstance(displays, dict):
                         for display_id, info in displays.items():
-                            name = info.get("name") or info.get("friendly_name") or display_id
+                            name = info.get("name") or info.get("friendly_name") or display_id if isinstance(info, dict) else str(info)
                             display_devices[display_id] = f"Remote Assist Display: {name}"
                     elif isinstance(displays, list):
                         for display_id in displays:
-                            display_devices[display_id] = f"Remote Assist Display: {display_id}"
+                            display_devices[str(display_id)] = f"Remote Assist Display: {display_id}"
                     break
         except Exception as e:
             _LOGGER.debug("Error getting Remote Assist Display devices: %s", e)
 
-    # Generic fallbacks: look for display-like entities
+    # --- Generic fallbacks (unchanged)
     try:
-        display_entity_patterns = ("display.", "screen.", "monitor.")
-        for pattern in display_entity_patterns:
-            matching_entities = [
-                entity_id for entity_id in hass.states.async_entity_ids() if entity_id.startswith(pattern)
-            ]
+        for pattern in ("display.", "screen.", "monitor."):
+            matching_entities = [eid for eid in hass.states.async_entity_ids() if eid.startswith(pattern)]
             if matching_entities:
-                _LOGGER.debug(
-                    "Found %d entities matching pattern '%s': %s",
-                    len(matching_entities),
-                    pattern,
-                    matching_entities[:3],
-                )
+                _LOGGER.debug("Found %d entities matching pattern '%s': %s", len(matching_entities), pattern, matching_entities[:3])
                 for entity_id in matching_entities[:5]:
                     state = hass.states.get(entity_id)
                     if state:
                         friendly_name = state.attributes.get("friendly_name", entity_id)
-                        display_devices[entity_id] = f"Display Entity: {friendly_name}"
+                        display_devices.setdefault(entity_id, f"Display Entity: {friendly_name}")
     except Exception as e:
         _LOGGER.debug("Error during generic display entity discovery: %s", e)
 
-    if not display_devices:
-        display_devices["dummy"] = "No display devices found"
+    # Always include "none" so selector renders, and add dummy if still empty
+    ordered_devices = {"none": "None (use text entities only)"}
+    ordered_devices.update(display_devices)
+    if len(ordered_devices) == 1:
+        ordered_devices["dummy"] = "dummy (no display devices found)"
 
-    return display_devices
+    _LOGGER.debug("Final available display devices: %s", list(ordered_devices.keys()))
+
+    return ordered_devices
+
 
 
 class MusicCompanionConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
